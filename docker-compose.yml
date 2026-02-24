@@ -1,0 +1,41 @@
+version: "3.9"
+
+services:
+  backend:
+    build: .
+    container_name: cmcc-backend
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:////data/migration_cmd_center.db
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - APP_ENV=development
+    volumes:
+      - ./:/app
+      - cmcc-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build: .
+    container_name: cmcc-frontend
+    command: streamlit run frontend/Home.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+    environment:
+      - BACKEND_URL=http://backend:8000
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    volumes:
+      - ./:/app
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  cmcc-data:

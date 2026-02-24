@@ -1,0 +1,284 @@
+# AWS Migration Runbook Collection
+## Cloud Migration Command Center – Sample Operational Knowledge Base
+
+---
+
+# RUNBOOK 001: Pre-Migration Discovery Checklist
+
+## Purpose
+Ensure all required information is gathered before beginning any migration wave.
+
+## Prerequisites
+- AWS credentials with Migration Hub read access
+- Network access to source systems
+- CMC (Cloud Migration Command Center) login
+
+## Steps
+
+### 1. Application Discovery
+- Use AWS Application Discovery Service (ADS) or import manually via CSV
+- Capture: app name, tech stack, data volume, dependencies, SLA, data classification
+- Tag ITAR/PCI/HIPAA applications appropriately in the CMC Compliance Center
+
+### 2. Dependency Mapping
+- Review auto-generated dependency graph in Migration Planner
+- Validate dependencies by consulting application owners
+- Identify circular dependencies and resolve with architecture team
+
+### 3. Data Volume Assessment
+- Run disk usage reports on source servers
+- Document database sizes with: SELECT pg_size_pretty(pg_database_size('mydb'));
+- Factor in growth rate (typically 10-15% per year)
+
+### 4. Network Bandwidth Check
+- Measure available bandwidth: iperf3 -c <target> -t 30
+- Estimate transfer time: data_volume_GB / (bandwidth_Mbps / 8) / 3600 = hours
+- Schedule off-peak migration windows for large data transfers
+
+---
+
+# RUNBOOK 002: EC2 Instance Migration (Lift-and-Shift / Rehost)
+
+## Purpose
+Migrate an EC2 instance to a different region or account using AMI copy.
+
+## When to Use
+- App classified as "Rehost" in Migration Planner
+- No code changes required
+- Direct 1:1 infrastructure lift
+
+## Steps
+
+### 1. Pre-Migration
+```bash
+# Create AMI from running instance
+aws ec2 create-image \
+  --instance-id i-0123456789abcdef0 \
+  --name "migration-$(date +%Y%m%d)-myapp" \
+  --no-reboot
+```
+
+### 2. Copy AMI to Target Region
+```bash
+aws ec2 copy-image \
+  --source-image-id ami-xxxxxxxxxxxxxxxxx \
+  --source-region us-east-1 \
+  --region us-gov-west-1 \
+  --name "myapp-govcloud-migration" \
+  --encrypted \
+  --kms-key-id alias/aws/ebs
+```
+
+### 3. Launch in Target
+- Navigate to EC2 > Launch Instance in target region
+- Select copied AMI
+- Attach same instance profile with updated IAM role ARN
+- Configure security groups to match source
+
+### 4. Validate and Cut Over
+- Test application endpoints
+- Update Route 53 weighted routing to 10% new / 90% old for canary
+- Monitor CloudWatch metrics for 1 hour
+- Cut over to 100% new instance if metrics are stable
+
+## Rollback
+- Revert Route 53 to 100% old instance
+- Terminate new instance
+- File incident report
+
+---
+
+# RUNBOOK 003: RDS Database Migration
+
+## Purpose
+Migrate an Amazon RDS instance across regions while maintaining data integrity.
+
+## Options
+A) AWS Database Migration Service (DMS) – minimal downtime
+B) RDS Snapshot Copy – simple but requires maintenance window
+
+## DMS Migration Steps
+
+### 1. Create Replication Instance
+```bash
+aws dms create-replication-instance \
+  --replication-instance-identifier my-replication-instance \
+  --replication-instance-class dms.r5.large \
+  --allocated-storage 100 \
+  --vpc-security-group-ids sg-xxxxxxxxx
+```
+
+### 2. Create Source and Target Endpoints
+```bash
+# Source endpoint
+aws dms create-endpoint \
+  --endpoint-identifier source-postgres \
+  --endpoint-type source \
+  --engine-name postgres \
+  --username admin \
+  --password $SOURCE_DB_PASS \
+  --server-name source-db.example.com \
+  --port 5432 \
+  --database-name mydb
+
+# Target endpoint (in new region)
+aws dms create-endpoint \
+  --endpoint-identifier target-postgres \
+  --endpoint-type target \
+  --engine-name postgres \
+  --username admin \
+  --password $TARGET_DB_PASS \
+  --server-name target-db.example.com \
+  --port 5432 \
+  --database-name mydb
+```
+
+### 3. Create and Start Migration Task
+```bash
+aws dms create-replication-task \
+  --replication-task-identifier migration-task-001 \
+  --source-endpoint-arn arn:aws:dms:... \
+  --target-endpoint-arn arn:aws:dms:... \
+  --replication-instance-arn arn:aws:dms:... \
+  --migration-type full-load-and-cdc \
+  --table-mappings file://table-mappings.json
+```
+
+## Verification
+- Row count comparison: source vs target
+- Checksum validation on critical tables
+- Application smoke tests
+
+---
+
+# RUNBOOK 004: ITAR Compliance Setup in AWS GovCloud
+
+## Purpose
+Configure an application environment to meet ITAR requirements in AWS GovCloud (US).
+
+## Key Requirements (from AWS GovCloud FAQ)
+- Deploy exclusively in us-gov-west-1 or us-gov-east-1
+- Only US persons may access resources
+- All data encrypted at rest (KMS) and in transit (TLS 1.2+)
+- CloudTrail enabled with log file integrity validation
+- No data transfers to commercial regions
+
+## Steps
+
+### 1. Create GovCloud Account
+- Contact AWS GovCloud sales or migrate via AWS Organizations
+- Execute AWS GovCloud agreement with US person attestation
+
+### 2. Configure KMS
+```bash
+# Create customer-managed key in GovCloud
+aws kms create-key \
+  --region us-gov-west-1 \
+  --description "ITAR workload encryption key" \
+  --key-usage ENCRYPT_DECRYPT \
+  --origin AWS_KMS
+```
+
+### 3. Enable CloudTrail
+```bash
+aws cloudtrail create-trail \
+  --name itar-audit-trail \
+  --s3-bucket-name itar-audit-logs-bucket \
+  --is-multi-region-trail \
+  --enable-log-file-validation \
+  --region us-gov-west-1
+```
+
+### 4. Configure S3 Bucket Policy (US-Only Access)
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Deny",
+    "Principal": "*",
+    "Action": "s3:*",
+    "Resource": ["arn:aws-us-gov:s3:::itar-data-bucket/*"],
+    "Condition": {
+      "StringNotEquals": {
+        "aws:RequestedRegion": ["us-gov-west-1", "us-gov-east-1"]
+      }
+    }
+  }]
+}
+```
+
+### 5. IAM Policy – Restrict to US Persons
+- Use IAM Identity Center with US-person verification
+- Enable MFA for all administrative access
+- Review with IAM Access Analyzer quarterly
+
+---
+
+# RUNBOOK 005: Incident Response – Migration Failure
+
+## Purpose
+Respond to a failed migration event with minimal data loss and service disruption.
+
+## Severity Classification
+- P1: Production service down, data loss risk
+- P2: Production service degraded, failback initiated
+- P3: Non-production failure, no immediate business impact
+
+## P1/P2 Response Steps
+
+### 1. Immediate Actions (0-15 minutes)
+1. Alert on-call engineer via PagerDuty
+2. Join #incident-response Slack channel
+3. Assess scope: which apps affected? Wave number?
+4. Initiate traffic failback to original instance immediately
+
+### 2. Failback Procedure
+```bash
+# Revert Route 53 record
+aws route53 change-resource-record-sets \
+  --hosted-zone-id ZXXXXXXXXXX \
+  --change-batch '{
+    "Changes": [{
+      "Action": "UPSERT",
+      "ResourceRecordSet": {
+        "Name": "app.example.com",
+        "Type": "CNAME",
+        "TTL": 60,
+        "ResourceRecords": [{"Value": "original-instance.example.com"}]
+      }
+    }]
+  }'
+```
+
+### 3. Root Cause Investigation
+- Review CloudWatch Logs for errors
+- Check CloudTrail for unauthorized API calls
+- Examine DMS task logs for replication errors
+- Review application logs on new instance
+
+### 4. Post-Incident
+- Document timeline in CMC Audit Log
+- Update runbook with lessons learned
+- Re-attempt migration in next available window with fixes applied
+
+---
+
+# FAQ: Common Migration Questions
+
+**Q: How long does a typical Rehost migration take?**
+A: For a single EC2 instance with under 100GB of data, plan for 2-4 hours including validation and cutover. Large databases (1TB+) may require 8-24 hours using DMS with CDC.
+
+**Q: Can I migrate ITAR-controlled data to AWS commercial regions?**
+A: No. ITAR-controlled data must remain in AWS GovCloud (US) regions (us-gov-west-1 or us-gov-east-1) at all times. Any transfer to commercial regions violates ITAR export control regulations.
+
+**Q: What is the difference between Rehost, Replatform, and Refactor?**
+A:
+- Rehost (Lift-and-Shift): Move the application as-is to AWS with no code changes. Fastest, lowest risk.
+- Replatform (Lift-and-Reshape): Move to AWS with minor optimizations (e.g., migrate from self-managed MySQL to RDS). Moderate effort.
+- Refactor (Re-architect): Redesign the application to use cloud-native services (e.g., break monolith into microservices on ECS). Highest effort but best long-term TCO.
+
+**Q: How do I estimate migration cost?**
+A: Use the AWS Pricing Calculator at calculator.aws. Input instance types, storage, data transfer, and managed service tiers. Compare against current on-premises costs including hardware depreciation, facility, and personnel.
+
+**Q: What happens if a migration wave fails mid-way?**
+A: Initiate the Runbook 005 Incident Response procedure. The CMC tracks wave status and you can reset the wave to "Planned" after remediation. Apps in a failed wave retain their pre-migration configuration.
