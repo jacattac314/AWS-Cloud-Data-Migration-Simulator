@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import settings
 from backend.models.database import create_tables
-from backend.routers import compliance, dashboard, knowledge, migration
+from backend.routers import compliance, dashboard, demo, knowledge, migration
 
 
 @asynccontextmanager
@@ -41,6 +41,7 @@ app.include_router(migration.router)
 app.include_router(knowledge.router)
 app.include_router(compliance.router)
 app.include_router(dashboard.router)
+app.include_router(demo.router)
 
 
 @app.get("/health")
